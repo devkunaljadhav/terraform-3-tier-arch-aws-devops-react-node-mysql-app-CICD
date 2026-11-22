@@ -1,83 +1,235 @@
-# 3-Tier Web Application on AWS
+# AWS 3-Tier Full-Stack Architecture
 
-**A practical reference for deploying a React, Node.js/Express, and MySQL application on AWS with a segmented network architecture and CI/CD.**
+<div align="center">
 
-![AWS](https://img.shields.io/badge/AWS-cloud%20architecture-orange?logo=amazonaws)
-![Frontend](https://img.shields.io/badge/frontend-React-61DAFB?logo=react&logoColor=20232A)
-![Backend](https://img.shields.io/badge/backend-Node.js-339933?logo=nodedotjs&logoColor=white)
-![Database](https://img.shields.io/badge/database-MySQL-4479A1?logo=mysql&logoColor=white)
-![Project type](https://img.shields.io/badge/type-learning%20project-blue)
+![AWS](https://img.shields.io/badge/AWS-Cloud%20Architecture-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white)
+![React](https://img.shields.io/badge/React-Frontend-61DAFB?style=for-the-badge&logo=react&logoColor=20232A)
+![Node.js](https://img.shields.io/badge/Node.js-Backend-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
+![MySQL](https://img.shields.io/badge/MySQL-RDS-4479A1?style=for-the-badge&logo=mysql&logoColor=white)
+![Nginx](https://img.shields.io/badge/Nginx-Web%20Server-009639?style=for-the-badge&logo=nginx&logoColor=white)
 
-This repository collects architecture diagrams, EC2 bootstrap scripts, and deployment notes for a three-tier AWS application. It is intended as a learning and implementation reference.
+**A production-style, highly available 3-tier AWS deployment for a React, Node.js, and MySQL application.**
 
-> **Repository scope:** The application source code, database dump, and CodeBuild/CodeDeploy specification files are not included here. The notes describe a deployment workflow for an application repository that supplies those files; this repository alone is not a deployable application.
+[Architecture](#-architecture) • [AWS Services](#-aws-services-used) • [Repository Files](#-repository-files) • [Deployment Guide](#-deployment-guide) • [Security](#-security-best-practices) • [Author](#-author)
 
-## Architecture
+</div>
 
-The design separates public entry points from application and database resources:
+---
 
-1. **Presentation tier** — an internet-facing Application Load Balancer routes HTTP/HTTPS traffic to NGINX web instances in private subnets. NGINX serves the frontend and proxies API requests.
-2. **Application tier** — an internal Application Load Balancer forwards API traffic to Node.js/Express instances in private subnets.
-3. **Data tier** — a private Amazon RDS for MySQL instance is reachable only from the application tier.
+## 📖 Overview
 
-The deployment notes also cover a VPC, public and private subnets across Availability Zones, security groups, Auto Scaling groups, S3 artifacts, Systems Manager Parameter Store, CloudWatch, and separate CI/CD pipelines for the web and application tiers. Route 53 and CloudFront are listed as optional edge services.
+This project demonstrates how to deploy a full-stack application across isolated AWS tiers while improving availability, scalability, security, and maintainability.
 
-![AWS three-tier architecture](./Architecture.png)
+The solution separates the presentation, application, and database layers, uses load balancing and Auto Scaling across multiple Availability Zones, and provides separate CI/CD pipelines for frontend and backend deployments.
 
-## Application previews
+> [!NOTE]
+> This repository contains infrastructure diagrams, bootstrap scripts, and deployment notes. The React source code, Node.js application source, database dump, `buildspec.yml`, and `appspec.yml` files are maintained separately.
 
-<p align="center">
-  <img src="./1.png" alt="Application preview 1" width="31%">
-  <img src="./2.png" alt="Application preview 2" width="31%">
-  <img src="./3.png" alt="Application preview 3" width="31%">
-</p>
+---
 
-## Repository contents
+## 🏗 Architecture
+
+![AWS 3-tier architecture](./Architecture.png)
+
+### Traffic Flow
+
+```text
+Internet
+   │
+   ▼
+Internet-facing Application Load Balancer
+   │
+   ▼
+Web Tier — Nginx on EC2 instances
+   │
+   ▼
+Internal Application Load Balancer
+   │
+   ▼
+Application Tier — Node.js / Express on EC2 instances
+   │
+   ▼
+Amazon RDS for MySQL
+```
+
+### Three-Tier Design
+
+| Tier | Purpose | Resources |
+|:---|:---|:---|
+| **Presentation** | Serves the React application and proxies API requests | Public subnets, external ALB, Nginx, EC2 Auto Scaling Group |
+| **Application** | Runs the Node.js API and application logic | Private subnets, internal ALB, Node.js, PM2, EC2 Auto Scaling Group |
+| **Data** | Stores application data securely | Private subnets, Amazon RDS for MySQL |
+
+The presentation and application tiers run in separate private/public security boundaries across multiple Availability Zones. Database access is restricted to approved application-tier resources.
+
+---
+
+## 🔄 Architecture Flow
+
+![AWS architecture and CI/CD flow](./Architecture-flow.png)
+
+The CI/CD flow delivers frontend and backend artifacts independently:
+
+1. Developer pushes source code to GitHub.
+2. AWS CodePipeline detects the change.
+3. AWS CodeBuild builds the application and creates an artifact.
+4. AWS CodeDeploy deploys the artifact to the appropriate EC2 Auto Scaling Group.
+5. Elastic Load Balancing routes traffic through healthy instances.
+6. CloudWatch collects application and infrastructure logs.
+
+---
+
+## ☁️ AWS Services Used
+
+| Category | AWS Services |
+|:---|:---|
+| Compute | Amazon EC2, EC2 Launch Templates, EC2 Auto Scaling |
+| Networking | Amazon VPC, Public and Private Subnets, Internet Gateway, NAT Gateway |
+| Load Balancing | Internet-facing and Internal Application Load Balancers |
+| Database | Amazon RDS for MySQL |
+| CI/CD | AWS CodeCommit/CodePipeline-ready GitHub integration, AWS CodeBuild, AWS CodeDeploy |
+| Security | IAM Roles, Security Groups, Systems Manager Parameter Store |
+| Storage | Amazon S3 |
+| Monitoring | Amazon CloudWatch Logs and CloudWatch metrics |
+| Delivery | Optional Amazon CloudFront and Amazon Route 53 |
+
+---
+
+## 📁 Repository Files
 
 | File | Description |
-| --- | --- |
-| [Architecture.png](./Architecture.png) | AWS architecture diagram |
-| [architecture1.png](./architecture1.png) | Additional architecture reference |
-| [AWS CICD Pipeline - AWS.txt](./AWS%20CICD%20Pipeline%20-%20AWS.txt) | Step-by-step AWS infrastructure and CI/CD notes |
-| [web-tier-user-data.txt](./web-tier-user-data.txt) | NGINX, CloudWatch Agent, and CodeDeploy bootstrap example |
-| [app-tier-user-data.txt](./app-tier-user-data.txt) | Node.js, PM2, CloudWatch Agent, and CodeDeploy bootstrap example |
-| [1.png](./1.png), [2.png](./2.png), [3.png](./3.png) | Application preview images |
+|:---|:---|
+| [Architecture.png](./Architecture.png) | Main AWS 3-tier architecture diagram |
+| [Architecture-flow.png](./Architecture-flow.png) | Architecture and deployment flow diagram |
+| [Documentation.txt](./Documentation.txt) | Complete AWS infrastructure, security, and CI/CD implementation guide |
+| [AWS CICD Pipeline - AWS.txt](./AWS%20CICD%20Pipeline%20-%20AWS.txt) | Original infrastructure and CI/CD deployment notes |
+| [app-tier-user-data.txt](./app-tier-user-data.txt) | Amazon Linux bootstrap script for Node.js, PM2, CloudWatch, and CodeDeploy |
+| [web-tier-user-data.txt](./web-tier-user-data.txt) | Amazon Linux bootstrap script for Nginx, CloudWatch, and CodeDeploy |
 
-## Deployment outline
+---
 
-The detailed walkthrough is in [AWS CICD Pipeline - AWS.txt](./AWS%20CICD%20Pipeline%20-%20AWS.txt). At a high level, the workflow is:
+## 🚀 Deployment Guide
 
-1. Create a VPC, subnets, route tables, and tier-specific security groups.
-2. Create the private database and store application settings securely.
-3. Configure EC2 launch templates, target groups, load balancers, and Auto Scaling groups.
-4. Configure the web and application instances using the supplied user-data examples.
-5. Set up separate CodeBuild, CodeDeploy, and CodePipeline workflows for each tier.
-6. Add DNS, HTTPS, and optional CloudFront distribution after validating the deployment.
+The detailed step-by-step checklist is available in [Documentation.txt](./Documentation.txt).
 
-### Prerequisites
+### 1. Prerequisites
 
-- An AWS account with permissions to create and configure the services above.
-- An AWS Region with at least two Availability Zones available.
-- The application source repository, including its build and deployment specifications.
-- A domain name and TLS certificate if you plan to configure public HTTPS.
-- Familiarity with VPC networking, IAM, EC2, RDS, and AWS deployment services.
+- AWS account with permissions for VPC, EC2, RDS, IAM, ELB, S3, CodeBuild, CodeDeploy, CodePipeline, and CloudWatch
+- AWS CLI or AWS Management Console access
+- EC2 key pair, where required
+- GitHub repository containing the application source
+- Domain name and TLS certificate for HTTPS
+- Familiarity with Linux, networking, React, Node.js, and MySQL
 
-### Before using the examples
+### 2. Infrastructure Setup
 
-- Review every example and replace environment-specific values, including hostnames, domains, ports, Region-specific URLs, and resource names.
-- Keep database credentials in **AWS Systems Manager Parameter Store as `SecureString`** or AWS Secrets Manager. Never commit real secrets to source control.
-- Restrict security-group rules to the required source security groups and ports. Avoid broad SSH ingress; prefer AWS Systems Manager Session Manager where possible.
-- Use least-privilege IAM policies, enable database backups and encryption, and validate health-check paths and deployment settings for your application.
-- Treat the bootstrap scripts as starting points: test them in a non-production environment and adapt package commands and service configuration to your chosen Amazon Linux release.
+1. Create a VPC with public and private subnets across two Availability Zones.
+2. Configure Internet Gateway, NAT Gateway, and route tables.
+3. Create tier-specific security groups.
+4. Create IAM roles for EC2, CodeBuild, CodeDeploy, and CodePipeline.
+5. Create private RDS MySQL subnet groups and database instance.
+6. Store database host, port, name, username, and password in Systems Manager Parameter Store.
 
-## Learning goals
+### 3. Application Tier
 
-- Understand separation of presentation, application, and data tiers.
-- Practice private-subnet deployment and controlled traffic flow between tiers.
-- Explore load balancing, health checks, and horizontal scaling with Auto Scaling.
-- Build an AWS CI/CD workflow and centralize logs with CloudWatch.
-- Apply safer configuration and secret-management practices.
+1. Create an application-tier launch template.
+2. Bootstrap EC2 instances with [app-tier-user-data.txt](./app-tier-user-data.txt).
+3. Create an internal Application Load Balancer and target group.
+4. Configure the application-tier Auto Scaling Group.
+5. Deploy the Node.js application on port `3200`.
 
-## Contributions
+### 4. Presentation Tier
 
-Improvements to the documentation, diagrams, and deployment examples are welcome. Please keep examples free of account identifiers, credentials, and other environment-specific secrets.
+1. Create a web-tier launch template.
+2. Configure Nginx and the internal ALB endpoint using [web-tier-user-data.txt](./web-tier-user-data.txt).
+3. Create an internet-facing Application Load Balancer and target group.
+4. Configure the web-tier Auto Scaling Group.
+5. Deploy the React build into Nginx.
+
+### 5. CI/CD Pipelines
+
+Create separate pipelines for the presentation and application tiers:
+
+| Stage | Application Tier | Presentation Tier |
+|:---|:---|:---|
+| Source | GitHub repository | GitHub repository |
+| Build | `backend/buildspec.yml` | `frontend/buildspec.yml` |
+| Deploy | `backend/appspec.yml` | `frontend/appspec.yml` |
+| Target | Application ASG / internal ALB target group | Web ASG / external ALB target group |
+
+After deployment, attach HTTPS, configure Route 53, and optionally add CloudFront for global delivery.
+
+---
+
+## 🛡 Security Best Practices
+
+- Never commit database credentials or AWS secrets to Git.
+- Store sensitive values as `SecureString` parameters in AWS Systems Manager Parameter Store or AWS Secrets Manager.
+- Use least-privilege IAM policies instead of broad administrative access.
+- Keep RDS and application servers in private subnets.
+- Restrict security groups by source security group, not `0.0.0.0/0`.
+- Use AWS Systems Manager Session Manager instead of exposing SSH where possible.
+- Enable encryption for EBS, RDS, S3, and backup data.
+- Use HTTPS at the load balancer and restrict HTTP to redirects.
+- Enable database backups, deletion protection, and Multi-AZ for production workloads.
+- Review CloudWatch logs and set alarms for unhealthy instances and application errors.
+
+> [!WARNING]
+> Review every bootstrap script before deployment. Replace sample domains, endpoints, regions, resource names, credentials, and account-specific values.
+
+---
+
+## ✅ Validation Checklist
+
+- [ ] VPC DNS hostnames and required route-table routes are enabled.
+- [ ] Public and private subnets are associated with the correct route tables.
+- [ ] Security groups allow only required tier-to-tier traffic.
+- [ ] RDS endpoint is reachable only from the application tier.
+- [ ] Application health checks return a successful response.
+- [ ] Internal ALB forwards API traffic to healthy application instances.
+- [ ] External ALB forwards requests to healthy Nginx instances.
+- [ ] CloudWatch receives application and deployment logs.
+- [ ] CodeBuild, CodeDeploy, and CodePipeline roles have only required permissions.
+- [ ] HTTPS, DNS, and CloudFront are configured before production use.
+
+---
+
+## 🎯 Learning Objectives
+
+- Design an isolated and highly available AWS network.
+- Deploy private EC2 application and database tiers.
+- Configure external and internal Application Load Balancers.
+- Implement EC2 Auto Scaling for horizontal scaling.
+- Set up separate frontend and backend CI/CD pipelines.
+- Apply AWS security, secret-management, logging, and monitoring practices.
+
+---
+
+## 🤝 Contributing
+
+Contributions that improve the diagrams, deployment documentation, automation, or security guidance are welcome.
+
+Before submitting changes:
+
+1. Remove account IDs, credentials, certificates, domains, and environment-specific values.
+2. Keep documentation aligned with the scripts and architecture diagrams.
+3. Test infrastructure changes in a non-production AWS account.
+
+---
+
+## 👨‍💻 Author
+
+**Kunal Jadhav**
+
+- 🌐 **Portfolio:** [kunalcloud.shop](https://kunalcloud.shop/)
+- 🐙 **GitHub:** [@devkunaljadhav](https://github.com/devkunaljadhav)
+- 💼 **LinkedIn:** [Kunal Jadhav](https://www.linkedin.com/in/devkunaljadhav)
+- 📧 **Email:** [kunaljadhav1625@gmail.com](mailto:kunaljadhav1625@gmail.com)
+
+---
+
+<div align="center">
+
+**If this project helped you, consider giving the repository a ⭐**
+
+</div>

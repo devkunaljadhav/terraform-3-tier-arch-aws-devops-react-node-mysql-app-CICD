@@ -1,0 +1,624 @@
+AWS 3-Tier Application Deployment and CI/CD Guide
+==================================================
+
+Author: Kunal Jadhav
+Repository: devkunaljadhav/3-tier-arch-aws-devops-react-node-mysql-app-CICD
+
+Purpose
+-------
+This guide describes the deployment of a React, Node.js/Express, and MySQL
+application on AWS using a highly available 3-tier architecture and separate
+CI/CD pipelines for the frontend and backend tiers.
+
+The instructions are intended as an AWS console implementation guide. Replace
+all example names, endpoints, regions, CIDR ranges, credentials, domains, and
+certificate IDs with values that match your AWS account and application.
+
+
+Table of Contents
+-----------------
+1. Architecture Overview
+2. Prerequisites
+3. VPC and Network Configuration
+4. Security Groups
+5. IAM Roles
+6. Amazon RDS for MySQL
+7. Application Tier
+8. Presentation Tier
+9. Systems Manager Parameter Store
+10. Amazon S3 Artifacts
+11. Backend CI/CD
+12. Frontend CI/CD
+13. HTTPS, CloudFront, and Route 53
+14. Validation and Troubleshooting
+15. Security and Cleanup
+
+
+1. Architecture Overview
+------------------------
+
+Internet
+   |
+   v
+External Application Load Balancer
+   |
+   v
+Web Tier: Nginx on EC2 instances
+   |
+   v
+Internal Application Load Balancer
+   |
+   v
+Application Tier: Node.js/Express on EC2 instances
+   |
+   v
+Amazon RDS for MySQL
+
+Deployment components:
+
++----------------------+-------------------------------------------------------------+
+| Tier                 | AWS resources                                               |
++----------------------+-------------------------------------------------------------+
+| Presentation         | Public subnets, external ALB, Nginx, EC2 ASG                |
+| Application          | Private subnets, internal ALB, Node.js/Express, PM2, EC2 ASG|
+| Data                 | Private subnets and Amazon RDS for MySQL                    |
++----------------------+-------------------------------------------------------------+
+
+Use at least two Availability Zones for the web, application, and database
+tiers to improve availability.
+
+
+2. Prerequisites
+----------------
+
+- An AWS account with permissions to create VPC, EC2, ELB, RDS, IAM, S3,
+  Systems Manager, CodeBuild, CodeDeploy, CodePipeline, Route 53, CloudFront,
+  and CloudWatch resources.
+- A region with at least two supported Availability Zones.
+- A GitHub repository containing the React and Node.js application source.
+- Backend and frontend build/deployment specifications:
+  * backend/buildspec.yml
+  * backend/appspec.yml
+  * frontend/buildspec.yml
+  * frontend/appspec.yml
+- Optional: a registered domain name and AWS Certificate Manager certificate.
+- Optional: Amazon Linux 2023 compatible EC2 key pair for emergency access.
+
+
+3. VPC and Network Configuration
+--------------------------------
+
+Create a VPC
+
+  Name: 3-tier-project
+  IPv4 CIDR: 192.168.0.0/16
+  Tenancy: Default
+  DNS resolution: Enabled
+  DNS hostnames: Enabled
+
+Create subnets
+
++-----------------------------+---------------------+-------------+
+| Subnet                     | Example CIDR        | Tier        |
++-----------------------------+---------------------+-------------+
+| public-subnet-1a           | 192.168.1.0/24      | Public      |
+| public-subnet-1b           | 192.168.2.0/24      | Public      |
+| private-web-subnet-1a      | 192.168.3.0/24      | Web         |
+| private-web-subnet-1b      | 192.168.4.0/24      | Web         |
+| private-app-subnet-1a      | 192.168.5.0/24      | Application |
+| private-app-subnet-1b      | 192.168.6.0/24      | Application |
+| private-db-subnet-1a       | 192.168.7.0/24      | Database    |
+| private-db-subnet-1b       | 192.168.8.0/24      | Database    |
++-----------------------------+---------------------+-------------+
+
+Configure gateways
+
+1. Create an Internet Gateway named 3-tier-project-igw.
+2. Attach the Internet Gateway to the VPC.
+3. Create an Elastic IP address.
+4. Create a NAT Gateway in public-subnet-1a.
+
+Configure route tables
+
+Public route table:
+
+  Destination: 0.0.0.0/0
+  Target: 3-tier-project-igw
+  Associations: public-subnet-1a, public-subnet-1b
+
+Private route table:
+
+  Destination: 0.0.0.0/0
+  Target: 3-tier-project-nat
+  Associations: all private web, application, and database subnets
+
+Enable auto-assign public IPv4 addresses for the public subnets if required.
+Instances in private subnets should normally receive private addresses only.
+
+
+4. Security Groups
+------------------
+
+Create the following security groups in the project VPC:
+
++----------------------+----------------------+-----------------------------------+
+| Security Group       | Inbound              | Source                            |
++----------------------+----------------------+-----------------------------------+
+| bastion-sg           | TCP 22               | Administrator-managed CIDR       |
+| web-alb-sg           | TCP 80, 443          | 0.0.0.0/0, IPv6 if required      |
+| web-sg               | TCP 80               | web-alb-sg                        |
+|                      | TCP 22               | bastion-sg or Session Manager     |
+| app-alb-sg           | TCP 80               | web-sg                            |
+| app-sg               | TCP 3200             | app-alb-sg                        |
+|                      | TCP 22               | bastion-sg or Session Manager     |
+| database-sg          | TCP 3306             | app-sg                            |
++----------------------+----------------------+-----------------------------------+
+
+Security guidance:
+
+- Do not allow SSH from 0.0.0.0/0.
+- Prefer AWS Systems Manager Session Manager instead of managing SSH keys.
+- Reference security groups as inbound sources instead of using the VPC CIDR.
+- Remove HTTP access when HTTPS-only routing is implemented.
+- Limit outbound database and application rules to required destinations.
+
+
+5. IAM Roles
+------------
+
+EC2 instance role
+
+  Role name: 3-tier-ec2-role
+  Trusted entity: EC2
+  Recommended policies:
+  - AmazonEC2RoleforAWSCodeDeploy
+  - CloudWatchAgentServerPolicy
+  - CloudWatchLogsFullAccess or a scoped CloudWatch Logs policy
+
+CodeBuild service role
+
+  Role name: 3-tier-codebuild-role
+  Trusted entity: CodeBuild
+  Required access:
+  - Read source and build artifacts
+  - Read approved Systems Manager parameters
+  - Write build logs
+  - Write to the deployment artifact bucket
+
+CodeDeploy service role
+
+  Role name: 3-tier-codedeploy-role
+  Trusted entity: CodeDeploy
+  Required access:
+  - Perform EC2 and Auto Scaling deployment operations
+  - Register and deregister instances with load balancers
+  - Write deployment logs
+
+CodePipeline service role
+
+  Role name: 3-tier-codepipeline-role
+  Trusted entity: CodePipeline
+  Required access:
+  - Read GitHub or CodeStar Connections source
+  - Start and read CodeBuild projects
+  - Create and execute CodeDeploy deployments
+  - Read and write to the pipeline artifact bucket
+
+Use customer-managed, least-privilege policies in production. Broad managed
+policies such as AmazonS3FullAccess and AWSCodeBuildAdminAccess should only be
+used for lab environments or replaced by scoped policies.
+
+
+6. Amazon RDS for MySQL
+-----------------------
+
+Create a DB subnet group
+
+  Name: 3-tier-db-subnet-group
+  VPC: 3-tier-project
+  Availability Zones: Use the database subnet's two Availability Zones
+  Subnets: private-db-subnet-1a and private-db-subnet-1b
+
+Create the database
+
+  Engine: MySQL
+  DB identifier: dev-db-instance
+  Initial database: Create only if required by the application
+  Public accessibility: No
+  Subnet group: 3-tier-db-subnet-group
+  Security group: database-sg
+  Encryption: Enabled
+  Storage: Enable autoscaling if supported
+  Backups: Enabled for production
+  Multi-AZ: Enabled for production
+  Credentials: Set through the console or AWS Secrets Manager
+
+Do not include an RDS endpoint or database password in source control.
+This guide uses placeholders because account-specific values must be generated
+by each deployment:
+
+  RDS_HOST=<RDS-ENDPOINT>
+  RDS_ADMIN_USER=<RDS-ADMIN-USERNAME>
+  RDS_ADMIN_PASSWORD=<STORE-SECURELY>
+
+Initialize the database
+
+1. Launch a bastion or start an authorized Session Manager session.
+2. Install the MariaDB/MySQL client:
+
+     sudo dnf install mariadb105 -y
+
+3. Connect using an approved credential method:
+
+     mysql -h "<RDS-ENDPOINT>" -u "<APPLICATION-ADMIN-USER>" -p
+
+4. Create the application database and application-specific database user.
+5. Import the database schema or SQL file from the application repository.
+6. Remove temporary credentials and close the database session.
+
+
+7. Application Tier
+-------------------
+
+Create the application launch template
+
+  Name: application-tier-LT
+  AMI: Amazon Linux 2023
+  Instance type: Select a suitable size for the application workload
+  IAM instance profile: 3-tier-ec2-role
+  Security group: app-sg
+  Subnet: Do not select a subnet at the launch-template level
+  User data: Use app-tier-user-data.txt
+
+Before launch, verify that the bootstrap script:
+
+- Installs Node.js 20
+- Installs and configures PM2
+- Creates application log directories
+- Installs the CloudWatch Agent
+- Installs the AWS CodeDeploy agent
+- Uses service names and log groups that match CloudWatch configuration
+
+Create the application target group
+
+  Name: app-tier-tg
+  Target type: Instance
+  Protocol: HTTP
+  Port: 3200
+  VPC: 3-tier-project
+  Health check path: /health
+
+Create the internal Application Load Balancer
+
+  Name: app-tier-internal-alb
+  Scheme: Internal
+  Subnets: private-app-subnet-1a and private-app-subnet-1b
+  Security group: app-alb-sg
+  Listener: HTTP 80
+  Default action: Forward to app-tier-tg
+
+Create the application Auto Scaling Group
+
+  Name: application-tier-ASG
+  Launch template: application-tier-LT
+  Subnets: private-app-subnet-1a and private-app-subnet-1b
+  Load balancer: app-tier-tg
+  Desired capacity: 2
+  Minimum capacity: 2
+  Maximum capacity: 4
+  Scaling policy: Target tracking based on average CPU utilization
+  Target CPU utilization: 50 percent
+  Health check: ELB and EC2
+
+
+8. Presentation Tier
+--------------------
+
+Create the web launch template
+
+  Name: web-tier-LT
+  AMI: Amazon Linux 2023
+  Instance type: Choose a size appropriate for Nginx and static delivery
+  IAM instance profile: 3-tier-ec2-role
+  Security group: web-sg
+  Subnet: Do not select a subnet at the launch-template level
+  User data: Use web-tier-user-data.txt
+
+Before launching instances, replace these placeholder values in the Nginx
+configuration:
+
+  APP_TIER_ALB_URL=<INTERNAL-APPLICATION-ALB-DNS-NAME>
+  SERVER_NAME=<APPLICATION-DOMAIN>
+
+The internal ALB must use an http:// URL unless HTTPS is configured between
+Nginx and the application tier.
+
+Create the web target group
+
+  Name: web-tier-tg
+  Target type: Instance
+  Protocol: HTTP
+  Port: 80
+  VPC: 3-tier-project
+  Health check path: /health
+
+Create the internet-facing Application Load Balancer
+
+  Name: web-tier-external-alb
+  Scheme: Internet-facing
+  Subnets: public-subnet-1a and public-subnet-1b
+  Security group: web-alb-sg
+  Listener: HTTP 80
+  Default action: Forward to web-tier-tg
+
+Create the web Auto Scaling Group
+
+  Name: web-tier-ASG
+  Launch template: web-tier-LT
+  Subnets: private-web-subnet-1a and private-web-subnet-1b
+  Load balancer: web-tier-tg
+  Desired capacity: 2
+  Minimum capacity: 2
+  Maximum capacity: 4
+  Scaling policy: Target tracking based on average CPU utilization
+  Target CPU utilization: 50 percent
+  Health check: ELB and EC2
+
+Open the external ALB DNS name in a browser and confirm that Nginx responds
+before adding HTTPS and DNS configuration.
+
+
+9. Systems Manager Parameter Store
+----------------------------------
+
+The backend build specification can read database configuration from AWS
+Systems Manager Parameter Store. Create parameters with paths that match the
+buildspec.yml configuration:
+
++--------------------------+--------------------------+----------------+
+| Parameter name           | Example data type        | Recommended    |
++--------------------------+--------------------------+----------------+
+| /nodeapp/db/hostname     | String                   | RDS endpoint   |
+| /nodeapp/db/name         | String                   | Database name  |
+| /nodeapp/db/password     | SecureString             | Required       |
+| /nodeapp/db/port         | String                   | 3306           |
+| /nodeapp/db/user         | SecureString             | Required       |
++--------------------------+--------------------------+----------------+
+
+Example buildspec.yml parameter mapping:
+
+  env:
+    parameter-store:
+      DB_PASSWORD: "/nodeapp/db/password"
+      DB_HOST: "/nodeapp/db/hostname"
+      DB_PORT: "/nodeapp/db/port"
+      DB_USER: "/nodeapp/db/user"
+      DB_NAME: "/nodeapp/db/name"
+
+Use SecureString for credentials. The CodeBuild role must have permission to
+decrypt the parameter with the associated AWS KMS key. Never commit parameter
+values or database credentials to the repository.
+
+
+10. Amazon S3 Artifacts
+-----------------------
+
+Create a private S3 bucket for CodeBuild and CodePipeline artifacts:
+
+  Bucket name: 3-tier-project-codebuild-artifacts
+  Block Public Access: Enabled
+  Bucket versioning: Enabled
+  Default encryption: Enabled
+  TLS-only bucket policy: Enabled
+
+Use a globally unique bucket name. Configure lifecycle rules to remove expired
+build artifacts according to the organization's retention policy.
+
+
+11. Backend CI/CD
+-----------------
+
+Create the backend CodeBuild project
+
+  Project name: backend-build
+  Source: GitHub repository
+  Source branch: main
+  Build specification: backend/buildspec.yml
+  Service role: 3-tier-codebuild-role
+  Artifact location: 3-tier-project-codebuild-artifacts
+  CloudWatch log group: codebuild-logs-backend
+  Trigger: Push to the main branch
+
+CodeStar Connections setup:
+
+1. Open AWS CodeBuild or CodePipeline.
+2. Create or select a GitHub connection.
+3. Authorize AWS to access the required repository.
+4. Set a push-based webhook filter for the main branch.
+5. Run a manual build and verify that it succeeds.
+
+If webhook creation fails, retry from the project settings or add the AWS
+CodeBuild webhook manually through GitHub repository settings.
+
+Create the backend CodeDeploy application
+
+  Application name: backend-deploy
+  Compute platform: EC2/On-premises
+
+Create the backend deployment group
+
+  Name: backend-deployment-group
+  Service role: 3-tier-codedeploy-role
+  Deployment type: In-place
+  Environment: application-tier-ASG
+  Deployment configuration: CodeDeployDefault.AllAtOnce
+  Target group: app-tier-tg
+  Deployment specification: backend/appspec.yml
+
+Create the backend CodePipeline pipeline
+
+  Pipeline name: backend-pipeline
+  Service role: 3-tier-codepipeline-role
+  Artifact bucket: 3-tier-project-codebuild-artifacts
+  Source provider: GitHub (Version 2) or CodeStar Connections
+  Repository: Your GitHub owner/repository
+  Branch: main
+  Build provider: AWS CodeBuild
+  Build project: backend-build
+  Deploy provider: AWS CodeDeploy
+  Application: backend-deploy
+  Deployment group: backend-deployment-group
+
+
+12. Frontend CI/CD
+------------------
+
+Create the frontend CodeBuild project
+
+  Project name: frontend-build
+  Source: GitHub repository
+  Source branch: main
+  Build specification: frontend/buildspec.yml
+  Service role: 3-tier-codebuild-role
+  Artifact location: 3-tier-project-codebuild-artifacts
+  CloudWatch log group: codebuild-logs-frontend
+  Trigger: Push to the main branch
+
+Create the frontend CodeDeploy application
+
+  Application name: frontend-deploy
+  Compute platform: EC2/On-premises
+
+Create the frontend deployment group
+
+  Name: frontend-deployment-group
+  Service role: 3-tier-codedeploy-role
+  Deployment type: In-place
+  Environment: web-tier-ASG
+  Deployment configuration: CodeDeployDefault.AllAtOnce
+  Target group: web-tier-tg
+  Deployment specification: frontend/appspec.yml
+
+Create the frontend CodePipeline pipeline
+
+  Pipeline name: frontend-pipeline
+  Service role: 3-tier-codepipeline-role
+  Artifact bucket: 3-tier-project-codebuild-artifacts
+  Source provider: GitHub (Version 2) or CodeStar Connections
+  Repository: Your GitHub owner/repository
+  Branch: main
+  Build provider: AWS CodeBuild
+  Build project: frontend-build
+  Deploy provider: AWS CodeDeploy
+  Application: frontend-deploy
+  Deployment group: frontend-deployment-group
+
+
+13. HTTPS, CloudFront, and Route 53
+-----------------------------------
+
+HTTPS
+
+1. Request or import an SSL/TLS certificate in AWS Certificate Manager.
+2. Request the certificate in the same region as the external ALB.
+3. Validate certificate ownership with DNS or email validation.
+4. Add an HTTPS listener on port 443 to the external ALB.
+5. Attach the ACM certificate to the listener.
+6. Add a forwarding or redirect rule that sends HTTP port 80 traffic to HTTPS.
+
+Route 53
+
+1. Create or use a hosted zone for the application domain.
+2. Create an Alias A record for the domain.
+3. Point the Alias target to the external Application Load Balancer.
+4. Verify DNS propagation and HTTPS certificate status.
+
+Amazon CloudFront
+
+1. Create a CloudFront distribution for the application origin.
+2. Set the external ALB DNS name as the origin.
+3. Configure the domain and ACM certificate for the distribution.
+4. Restrict origin access to approved CloudFront traffic when applicable.
+5. Configure cache behaviors for static assets and API routes.
+6. Do not cache dynamic API responses unless the application explicitly supports it.
+
+
+14. Validation and Troubleshooting
+----------------------------------
+
+Validation checklist
+
+[ ] VPC DNS resolution and DNS hostnames are enabled.
+[ ] Public subnets route to the Internet Gateway.
+[ ] Private subnets route outbound traffic through the NAT Gateway.
+[ ] All application instances are in private subnets.
+[ ] RDS public accessibility is disabled.
+[ ] External ALB target instances pass health checks.
+[ ] Internal ALB target instances pass health checks.
+[ ] The /health endpoint returns HTTP 200.
+[ ] Nginx can reach the internal application ALB.
+[ ] Database credentials are stored outside source control.
+[ ] CodeBuild and CodePipeline roles can access required resources.
+[ ] CloudWatch log groups receive application and agent logs.
+[ ] HTTP redirects to HTTPS.
+[ ] Route 53 resolves the application domain to the ALB or CloudFront.
+
+Common troubleshooting
+
+Unhealthy web instances:
+- Verify /health is exposed on port 80.
+- Verify web-sg allows traffic from web-alb-sg.
+- Review Nginx status and /var/log/nginx/error.log.
+
+Unhealthy application instances:
+- Verify /health is exposed on port 3200.
+- Verify app-sg allows traffic from app-alb-sg.
+- Review PM2 and application log files.
+
+Database connection failure:
+- Verify database-sg allows TCP 3306 from app-sg.
+- Verify RDS and application instances use the same VPC.
+- Verify parameter names and values.
+- Verify the application database user and network ACL rules.
+
+CodeBuild failure:
+- Review build logs and IAM permissions.
+- Verify buildspec paths and source artifacts.
+- Verify the CodeBuild role can decrypt Parameter Store values.
+
+CodeDeploy failure:
+- Verify the CodeDeploy agent is running.
+- Review deployment and agent logs in CloudWatch.
+- Verify appspec.yml lifecycle hooks and file destinations.
+- Verify the instance profile and deployment service role permissions.
+
+
+15. Security and Cleanup
+------------------------
+
+Security requirements
+
+- Do not commit credentials, endpoints, certificates, or account IDs.
+- Store secrets in AWS Secrets Manager or Systems Manager SecureString parameters.
+- Use least-privilege IAM policies.
+- Encrypt Amazon S3, EBS, RDS, and CloudWatch data.
+- Enable RDS automated backups and production deletion protection.
+- Enable CloudWatch alarms for unhealthy targets, instance failures, and scaling.
+- Enable S3 and CloudTrail logging where required by organizational policy.
+- Rotate database and application credentials regularly.
+- Review network ACLs, security groups, and public resources before production.
+
+Cost and cleanup
+
+Stop or terminate the environment when it is no longer required:
+
+1. Delete CloudFront distributions and Route 53 records.
+2. Delete CodePipeline pipelines, build projects, and deployment applications.
+3. Delete Auto Scaling Groups and launch templates.
+4. Delete target groups and load balancers.
+5. Delete EC2 instances and associated EBS volumes.
+6. Delete RDS instances after creating required backups.
+7. Empty and delete the S3 artifact bucket.
+8. Delete NAT Gateways and release Elastic IP addresses.
+9. Delete security groups, subnets, route tables, Internet Gateway, and VPC.
+10. Review AWS Cost Explorer and active resources after cleanup.
